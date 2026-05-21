@@ -21,7 +21,11 @@ const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-const PROXY_URL = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';
+const PROXY_URL =
+  process.env.EXTRACTOR_PROXY ||
+  process.env.HTTPS_PROXY ||
+  process.env.HTTP_PROXY ||
+  '';
 const proxyAgent = PROXY_URL ? new SocksProxyAgent(PROXY_URL) : null;
 
 if (proxyAgent) {
