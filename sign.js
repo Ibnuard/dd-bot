@@ -59,3 +59,29 @@ export function buildPlayerUrl(videoUrl, referer) {
 
   return `${PLAYER_BASE_URL}/play?${params.toString()}`;
 }
+
+/**
+ * Build a signed /api/stream URL with download=1 set.
+ *
+ * Browsers/mobile clients hitting this URL will get a Content-Disposition:
+ * attachment response, triggering their native download manager. Useful for
+ * the Telegram "📥 Download" button.
+ */
+export function buildDownloadUrl(videoUrl, referer) {
+  if (!isConfigured()) return null;
+
+  const exp = Math.floor(Date.now() / 1000) + LINK_TTL_SECONDS;
+  const ref = referer || '';
+  const payload = `u=${videoUrl}&r=${ref}&e=${exp}`;
+  const sig = signPayload(payload);
+
+  const params = new URLSearchParams({
+    url: videoUrl,
+    exp: String(exp),
+    sig,
+    download: '1',
+  });
+  if (ref) params.set('ref', ref);
+
+  return `${PLAYER_BASE_URL}/api/stream?${params.toString()}`;
+}

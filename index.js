@@ -16,7 +16,11 @@ import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 
 import { extractVideos } from './extractor.js';
-import { buildPlayerUrl, isConfigured as isPlayerConfigured } from './sign.js';
+import {
+  buildPlayerUrl,
+  buildDownloadUrl,
+  isConfigured as isPlayerConfigured,
+} from './sign.js';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALLOWED = (process.env.ALLOWED_CHAT_IDS || '')
@@ -38,28 +42,27 @@ const escapeMd = (s) =>
   String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
 
 /**
- * Build a single video block in MarkdownV2.
+ * Build the inline keyboard for a single video.
  *
- * Layout:
- *   *N.* 📺 [Tonton di browser](player_url)
- *   `raw_cdn_url`
+ * Two URL buttons: 📺 Watch (opens /play in browser) and 📥 Download
+ * (hits /api/stream with download=1, browser triggers save dialog).
  *
- * If the player isn't configured (no PLAYER_BASE_URL/STREAM_SECRET), we drop
- * the player line and just show the raw URL.
+ * Returns null when the player isn't configured — caller should fall back
+ * to a plain text reply.
  */
-function formatVideoBlock(number, videoUrl, sourceUrl) {
-  const lines = [`*${number}\\.* \`${escapeMd(videoUrl)}\``];
+function buildVideoKeyboard(videoUrl, sourceUrl) {
   const playerUrl = buildPlayerUrl(videoUrl, sourceUrl);
-  if (playerUrl) {
-    // The (url) part of inline links must escape `)` and `\`; we keep our
-    // generated URLs simple enough that this isn't an issue, but escape just
-    // in case someone passes a weird upstream.
-    const safeUrl = playerUrl.replace(/\\/g, '\\\\').replace(/\)/g, '\\)');
-    lines.unshift(`*${number}\\.* 📺 [Tonton di browser](${safeUrl})`);
-    // Drop the duplicated number on the second line.
-    lines[1] = `   \`${escapeMd(videoUrl)}\``;
-  }
-  return lines.join('\n');
+  const downloadUrl = buildDownloadUrl(videoUrl, sourceUrl);
+  if (!playerUrl || !downloadUrl) return null;
+
+  return {
+    inline_keyboard: [
+      [
+        { text: '📺 Watch', url: playerUrl },
+        { text: '📥 Download', url: downloadUrl },
+      ],
+    ],
+  };
 }
 
 bot.onText(/^\/start$/, (msg) => {
@@ -137,20 +140,34 @@ bot.on('message', async (msg) => {
       );
     }
 
-    // Reply: one block per video. When the player is configured, surface
-    // a 📺 link that goes through our proxy (handles Referer + HLS rewrite),
-    // and keep the raw CDN URL below for IDM/VLC users.
-    const header = `\u2705 Ditemukan *${videos.length}* video\n`;
-    const blocks = videos
-      .map((videoUrl, i) => formatVideoBlock(i + 1, videoUrl, url.toString()))
-      .join('\n\n');
+    // First update the status message with the count summary, then send one
+    // message per video with its own inline keyboard. Per-video messages give
+    // each result its own pair of Watch/Download buttons.
+    await bot.editMessageText(
+      `✅ Ditemukan *${videos.length}* video\\.`,
+      {
+        chat_id: msg.chat.id,
+        message_id: status.message_id,
+        parse_mode: 'MarkdownV2',
+        disable_web_page_preview: true,
+      }
+    );
 
-    await bot.editMessageText([header, blocks].join('\n'), {
-      chat_id: msg.chat.id,
-      message_id: status.message_id,
-      parse_mode: 'MarkdownV2',
-      disable_web_page_preview: true,
-    });
+    for (let i = 0; i < videos.length; i++) {
+      const videoUrl = videos[i];
+      const keyboard = buildVideoKeyboard(videoUrl, url.toString());
+
+      const text = [
+        `*Video ${i + 1}*`,
+        `\`${escapeMd(videoUrl)}\``,
+      ].join('\n');
+
+      await bot.sendMessage(msg.chat.id, text, {
+        parse_mode: 'MarkdownV2',
+        disable_web_page_preview: true,
+        ...(keyboard ? { reply_markup: keyboard } : {}),
+      });
+    }
   } catch (e) {
     console.error('[bot] extract error:', e);
     await bot
