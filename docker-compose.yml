@@ -14,6 +14,10 @@ services:
     # Pass through all env vars defined in .env (TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_IDS, etc.)
     env_file:
       - .env
+    # Resolve `host.docker.internal` to the host's gateway IP so the bot can
+    # reach Cloudflare WARP (or any other proxy) running on the VPS.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # No `ports:` block — the bot is pure Telegram polling (outbound only),
     # so it doesn't need to expose any HTTP port on the host.
     # `init: true` runs an init system as PID 1 so SIGTERM is forwarded properly

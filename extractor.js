@@ -7,11 +7,37 @@
  *   2. Parse <source>, <video>, and direct mp4/m3u8 URLs
  *   3. Resolve JS variable concatenation and template literals (`${var}`)
  *   4. Recursively follow iframe chains up to 3 levels deep
+ *
+ * Proxy support:
+ *   If HTTPS_PROXY or HTTP_PROXY env var is set (e.g. socks5://127.0.0.1:40000
+ *   for Cloudflare WARP), all requests go through it. This is how we bypass
+ *   datacenter IP fingerprinting on Cloudflare-protected hosts.
  */
+
+import nodeFetch from 'node-fetch';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+const PROXY_URL = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';
+const proxyAgent = PROXY_URL ? new SocksProxyAgent(PROXY_URL) : null;
+
+if (proxyAgent) {
+  console.log(`[extractor] routing fetches through proxy: ${PROXY_URL}`);
+} else {
+  console.log('[extractor] no proxy configured, using direct connection');
+}
+
+// Wrapper: use node-fetch + agent when proxy is configured, otherwise
+// use native fetch (lighter, no extra hops).
+const httpFetch = (url, opts = {}) => {
+  if (proxyAgent) {
+    return nodeFetch(url, { ...opts, agent: proxyAgent });
+  }
+  return fetch(url, opts);
+};
 
 function resolveUrl(src, base) {
   if (src.startsWith('http://') || src.startsWith('https://')) return src;
@@ -50,7 +76,7 @@ async function fetchHtml(pageUrl, depth, referer) {
 
   // Tier 1: direct
   try {
-    const response = await fetch(pageUrl, { headers, redirect: 'follow' });
+    const response = await httpFetch(pageUrl, { headers, redirect: 'follow' });
     console.log(
       `[extractor] direct depth=${depth} ${pageUrl} -> ${response.status}`
     );
@@ -90,7 +116,7 @@ async function fetchHtml(pageUrl, depth, referer) {
     proxyUrl.searchParams.set('keep_headers', 'true');
     if (referer) proxyUrl.searchParams.set('referer', referer);
 
-    const response = await fetch(proxyUrl.toString(), { headers });
+    const response = await httpFetch(proxyUrl.toString(), { headers });
     console.log(
       `[extractor] scraperapi depth=${depth} ${pageUrl} -> ${response.status}`
     );
