@@ -111,10 +111,11 @@ bot.on('message', async (msg) => {
       );
     }
 
-    // Reply: a single message per video so users can long-press to copy/open
+    // Reply: a single message per video so users can long-press to copy/open.
+    // Note the escaped '.' after the number — MarkdownV2 requires it.
     const header = `✅ Ditemukan *${videos.length}* video\n`;
     const blocks = videos
-      .map((videoUrl, i) => `*${i + 1}.* \`${escapeMd(videoUrl)}\``)
+      .map((videoUrl, i) => `*${i + 1}\\.* \`${escapeMd(videoUrl)}\``)
       .join('\n\n');
 
     await bot.editMessageText([header, blocks].join('\n'), {
