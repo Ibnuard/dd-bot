@@ -28,10 +28,4 @@ USER node
 COPY --chown=node:node --from=deps /app/node_modules ./node_modules
 COPY --chown=node:node . .
 
-EXPOSE 3000
-
-# Quick liveness probe; the bot answers /health with 200 when polling is up
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --quiet --tries=1 --spider http://127.0.0.1:${PORT:-3000}/health || exit 1
-
 CMD ["node", "index.js"]

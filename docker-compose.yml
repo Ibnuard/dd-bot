@@ -11,13 +11,11 @@ services:
     container_name: doomsday-bot
     build: .
     restart: unless-stopped
-    # Pass through all env vars defined in .env (TELEGRAM_BOT_TOKEN, PUBLIC_URL, etc.)
+    # Pass through all env vars defined in .env (TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_IDS, etc.)
     env_file:
       - .env
-    ports:
-      # Bind only to loopback by default — put Caddy/nginx in front for HTTPS.
-      # Change to "0.0.0.0:3000:3000" if you want the bot directly internet-exposed.
-      - "127.0.0.1:3000:3000"
+    # No `ports:` block — the bot is pure Telegram polling (outbound only),
+    # so it doesn't need to expose any HTTP port on the host.
     # `init: true` runs an init system as PID 1 so SIGTERM is forwarded properly
     # and child processes (Telegram polling) don't become zombies on shutdown.
     init: true
