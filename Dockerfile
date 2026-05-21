@@ -21,8 +21,15 @@ RUN if [ -f package-lock.json ]; then \
 FROM node:20-alpine AS runner
 WORKDIR /app
 
-# Run as the prebuilt non-root `node` user for safer filesystem access
+# Run as the prebuilt non-root `node` user for safer filesystem access.
 ENV NODE_ENV=production
+
+# Pre-create the data dir with the right owner BEFORE switching user.
+# When docker compose mounts a fresh named volume here, it seeds the volume
+# from the image — including this ownership. Without this, the volume root
+# stays owned by root and the non-root process gets EACCES on write.
+RUN mkdir -p /app/data && chown -R node:node /app
+
 USER node
 
 COPY --chown=node:node --from=deps /app/node_modules ./node_modules
