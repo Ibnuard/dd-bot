@@ -50,16 +50,32 @@ function resolveUrl(src, base) {
   return `${base.origin}/${src}`;
 }
 
-function isCloudflareChallenge(html) {
-  if (!html || html.length < 1000) return false;
-  const lower = html.toLowerCase();
-  return (
-    lower.includes('just a moment') ||
-    lower.includes('cf-chl-bypass') ||
-    lower.includes('__cf_chl_') ||
-    lower.includes('cf_chl_opt') ||
-    (lower.includes('challenge-platform') && lower.includes('cloudflare'))
-  );
+function isCloudflareChallenge(html, status) {
+  if (!html) return false;
+
+  // Strongest signal: real CF challenge pages always have one of these titles.
+  const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+  const title = titleMatch ? titleMatch[1].toLowerCase().trim() : '';
+  if (title.startsWith('just a moment') || title.startsWith('attention required')) {
+    return true;
+  }
+
+  // Secondary signal: HTTP status indicates a block AND HTML contains CF
+  // challenge runtime markers. We require BOTH because legit pages often
+  // include CF Insights / Turnstile / etc. scripts that name-match these
+  // strings without being challenge pages.
+  if (status === 403 || status === 503 || status === 429) {
+    const lower = html.toLowerCase();
+    if (
+      lower.includes('cf-chl-bypass') ||
+      lower.includes('__cf_chl_') ||
+      (lower.includes('challenge-platform') && lower.includes('cloudflare'))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -89,7 +105,7 @@ async function fetchHtml(pageUrl, depth, referer) {
       response.status === 403 || response.status === 429 || response.status === 503;
     if (response.ok) {
       const html = await response.text();
-      if (!isCloudflareChallenge(html)) return html;
+      if (!isCloudflareChallenge(html, response.status)) return html;
       console.log('[extractor] direct hit Cloudflare challenge, trying ScraperAPI');
     } else if (!blocked && response.status < 500) {
       return null;
@@ -132,7 +148,7 @@ async function fetchHtml(pageUrl, depth, referer) {
     }
 
     const html = await response.text();
-    if (isCloudflareChallenge(html)) {
+    if (isCloudflareChallenge(html, response.status)) {
       console.log('[extractor] scraperapi response still looks like CF challenge');
       return null;
     }
