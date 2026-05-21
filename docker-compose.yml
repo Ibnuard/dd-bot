@@ -14,6 +14,12 @@ services:
     # Pass through all env vars defined in .env (TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_IDS, etc.)
     env_file:
       - .env
+    # Container-only env. Defined here (not in .env) on purpose: docker compose
+    # auto-loads .env into its own process environment, which means putting
+    # HTTPS_PROXY there would make buildkit honor the proxy and break image
+    # pulls (host.docker.internal isn't resolvable during build).
+    environment:
+      - HTTPS_PROXY=socks5://host.docker.internal:40000
     # Resolve `host.docker.internal` to the host's gateway IP so the bot can
     # reach Cloudflare WARP (or any other proxy) running on the VPS.
     extra_hosts:
