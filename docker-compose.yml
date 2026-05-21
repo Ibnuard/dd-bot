@@ -1,0 +1,29 @@
+# Doomsday Bot — Docker Compose configuration.
+#
+# Usage:
+#   cp .env.example .env       # then edit .env
+#   docker compose up -d       # start in background
+#   docker compose logs -f     # follow logs
+#   docker compose pull && docker compose up -d --build   # update
+
+services:
+  bot:
+    container_name: doomsday-bot
+    build: .
+    restart: unless-stopped
+    # Pass through all env vars defined in .env (TELEGRAM_BOT_TOKEN, PUBLIC_URL, etc.)
+    env_file:
+      - .env
+    ports:
+      # Bind only to loopback by default — put Caddy/nginx in front for HTTPS.
+      # Change to "0.0.0.0:3000:3000" if you want the bot directly internet-exposed.
+      - "127.0.0.1:3000:3000"
+    # `init: true` runs an init system as PID 1 so SIGTERM is forwarded properly
+    # and child processes (Telegram polling) don't become zombies on shutdown.
+    init: true
+    # Defensive resource cap — Telegram polling is light, but extraction can
+    # spike memory if a page is huge. Tune if you see OOM kills.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
