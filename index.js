@@ -1,16 +1,21 @@
 /**
  * Doomsday Bot — pure Telegram interface.
  *
- * Flow: user pastes URL → bot extracts → bot replies with the raw video URL
+ * Flow: user pastes URL → bot extracts → bot replies with the raw video URLs
  * plus inline buttons (Watch / Download / Save).
  *
  * Save flow:
- *   - User taps 💾 Save → bot writes the video to data/saved.json under their
- *     chat ID and edits the message buttons to show ✓ Saved.
- *   - /list → numbered list of saved videos for that chat.
- *   - User types a number (e.g. "2") → bot re-issues Watch/Download buttons
- *     for that saved entry.
- *   - /clear → wipes the saved list for the chat.
+ *   - User taps 💾 Save on the status message → bot stores the source PAGE URL
+ *     (not the extracted video URL) under their chat ID.
+ *   - /list → numbered list of saved pages.
+ *   - User types a number → bot re-runs extraction on the saved page so they
+ *     always get fresh CDN URLs and fresh HMAC links.
+ *   - /clear → wipes the saved list.
+ *
+ * Why save the page URL, not the video URL?
+ *   CDN URLs typically embed signed tokens that expire in hours. Saving the
+ *   page URL means the user always gets a working link, at the cost of one
+ *   extra extraction round-trip when opening a saved entry.
  *
  * Required env (see .env.example):
  *   TELEGRAM_BOT_TOKEN
@@ -36,7 +41,7 @@ import {
 import {
   listSaved,
   getSavedAt,
-  saveVideo,
+  savePage,
   clearSaved,
 } from './storage.js';
 
@@ -62,23 +67,18 @@ const escapeMd = (s) =>
 // ---------------------------------------------------------------------------
 // Pending-save token map.
 //
-// Telegram caps callback_data at 64 bytes, which is nowhere near enough for
-// raw video + source URLs. Instead we mint a short token, stash the URLs in
-// memory, and resolve the token when the Save callback fires.
-//
-// The map is bounded so a long-running bot doesn't accumulate memory; oldest
-// tokens are evicted FIFO. Pragmatic: even a chatty user is unlikely to leave
-// hundreds of unsaved Watch/Download messages around.
+// Telegram caps callback_data at 64 bytes. The page URL alone often exceeds
+// that, so we mint a short token and stash the URL in memory; the callback
+// looks it up. Bounded FIFO eviction stops the map from growing unbounded.
 // ---------------------------------------------------------------------------
 
 const PENDING = new Map();
 const PENDING_MAX = 500;
 
-function makePendingToken(videoUrl, sourceUrl) {
+function makePendingToken(sourceUrl) {
   const token = crypto.randomBytes(6).toString('base64url'); // 8 chars
-  PENDING.set(token, { videoUrl, sourceUrl });
+  PENDING.set(token, { sourceUrl });
   if (PENDING.size > PENDING_MAX) {
-    // Drop the oldest entry. Map iteration is insertion-ordered.
     const oldest = PENDING.keys().next().value;
     PENDING.delete(oldest);
   }
@@ -86,10 +86,11 @@ function makePendingToken(videoUrl, sourceUrl) {
 }
 
 // ---------------------------------------------------------------------------
-// Inline keyboard builder
+// Inline keyboards
 // ---------------------------------------------------------------------------
 
-function buildVideoKeyboard(videoUrl, sourceUrl, { saved = false } = {}) {
+/** Buttons for an individual extracted video URL. */
+function buildVideoKeyboard(videoUrl, sourceUrl) {
   const playerUrl = buildPlayerUrl(videoUrl, sourceUrl);
   const downloadUrl = buildDownloadUrl(videoUrl, sourceUrl);
 
@@ -97,14 +98,91 @@ function buildVideoKeyboard(videoUrl, sourceUrl, { saved = false } = {}) {
   if (playerUrl) row.push({ text: '📺 Watch', url: playerUrl });
   if (downloadUrl) row.push({ text: '📥 Download', url: downloadUrl });
 
+  return row.length > 0 ? { inline_keyboard: [row] } : null;
+}
+
+/**
+ * Save button keyboard for the status/header message — saves the SOURCE PAGE
+ * URL, not any individual extracted video.
+ */
+function buildSavePageKeyboard(sourceUrl, { saved = false } = {}) {
   if (saved) {
-    row.push({ text: '✓ Saved', callback_data: 'noop' });
-  } else {
-    const token = makePendingToken(videoUrl, sourceUrl);
-    row.push({ text: '💾 Save', callback_data: `s:${token}` });
+    return {
+      inline_keyboard: [[{ text: '✓ Tersimpan', callback_data: 'noop' }]],
+    };
+  }
+  const token = makePendingToken(sourceUrl);
+  return {
+    inline_keyboard: [[{ text: '💾 Simpan halaman ini', callback_data: `s:${token}` }]],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared extraction-and-reply pipeline.
+//
+// Used by:
+//   - paste-URL flow (user typed a URL into chat)
+//   - saved-list flow (user typed a number that maps to a saved page)
+//
+// Sends a status message, runs extraction, edits the status when done and
+// posts one message per extracted video with Watch/Download buttons. The
+// status message gets a 💾 Save button when `saveable` is true.
+// ---------------------------------------------------------------------------
+
+async function extractAndReply(chatId, sourceUrl, { saveable = true } = {}) {
+  const status = await bot.sendMessage(
+    chatId,
+    `🔍 Sedang ekstrak\\.\\.\\.\n\`${escapeMd(sourceUrl)}\``,
+    { parse_mode: 'MarkdownV2' }
+  );
+
+  let videos;
+  try {
+    videos = await extractVideos(sourceUrl);
+  } catch (e) {
+    console.error('[bot] extract error:', e);
+    return bot
+      .editMessageText(`❌ Error: ${escapeMd(e.message || String(e))}`, {
+        chat_id: chatId,
+        message_id: status.message_id,
+        parse_mode: 'MarkdownV2',
+      })
+      .catch(() => {});
   }
 
-  return row.length > 0 ? { inline_keyboard: [row] } : null;
+  if (videos.length === 0) {
+    return bot.editMessageText('❌ Tidak ditemukan video pada halaman ini\\.', {
+      chat_id: chatId,
+      message_id: status.message_id,
+      parse_mode: 'MarkdownV2',
+    });
+  }
+
+  const headerText = [
+    `✅ Ditemukan *${videos.length}* video dari:`,
+    `\`${escapeMd(sourceUrl)}\``,
+  ].join('\n');
+
+  await bot.editMessageText(headerText, {
+    chat_id: chatId,
+    message_id: status.message_id,
+    parse_mode: 'MarkdownV2',
+    disable_web_page_preview: true,
+    ...(saveable ? { reply_markup: buildSavePageKeyboard(sourceUrl) } : {}),
+  });
+
+  for (let i = 0; i < videos.length; i++) {
+    const videoUrl = videos[i];
+    const keyboard = buildVideoKeyboard(videoUrl, sourceUrl);
+
+    const body = [`*Video ${i + 1}*`, `\`${escapeMd(videoUrl)}\``].join('\n');
+
+    await bot.sendMessage(chatId, body, {
+      parse_mode: 'MarkdownV2',
+      disable_web_page_preview: true,
+      ...(keyboard ? { reply_markup: keyboard } : {}),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,10 +198,13 @@ bot.onText(/^\/start$/, (msg) => {
       '',
       'Kirim URL halaman video, saya balikin link video aslinya\\.',
       '',
-      '*Quick actions:*',
+      '*Quick actions per video:*',
       '• 📺 Watch — putar di browser',
       '• 📥 Download — simpan ke device',
-      '• 💾 Save — simpan ke list, akses lagi pakai /list',
+      '',
+      '*Save halaman:*',
+      '• 💾 Simpan halaman ini — append ke /list',
+      '• `/list` lalu kirim angka — re\\-extract halaman tersimpan dengan link fresh',
       '',
       '_Tip: kalau link diputar di browser ngambek, coba VLC \\(yang bisa set Referer header\\)\\._',
     ].join('\n'),
@@ -138,12 +219,12 @@ bot.onText(/^\/help$/, (msg) => {
     [
       '*Cara pakai:*',
       '1\\. Kirim URL halaman video',
-      '2\\. Tunggu beberapa detik',
-      '3\\. Pilih Watch / Download / Save',
+      '2\\. Pilih Watch / Download per video',
+      '3\\. Atau tap 💾 Simpan halaman ini di header hasil',
       '',
-      '*Saved videos:*',
-      '/list — lihat semua yang tersimpan',
-      'kirim angka \\(misal `2`\\) untuk dapet link video ke\\-2 di list',
+      '*Saved pages:*',
+      '/list — lihat halaman yang tersimpan',
+      'kirim angka \\(misal `2`\\) — extract ulang halaman ke\\-2 dengan link fresh',
       '/clear — kosongkan list saved',
       '',
       '*Cleanup:*',
@@ -169,7 +250,7 @@ bot.onText(/^\/list$/, async (msg) => {
   if (list.length === 0) {
     return bot.sendMessage(
       msg.chat.id,
-      'Belum ada video tersimpan\\. Tap 💾 Save di hasil ekstraksi untuk menyimpan\\.',
+      'Belum ada halaman tersimpan\\. Tap 💾 Simpan halaman ini di hasil ekstraksi\\.',
       { parse_mode: 'MarkdownV2' }
     );
   }
@@ -177,17 +258,17 @@ bot.onText(/^\/list$/, async (msg) => {
   const lines = list.map((entry, i) => {
     const date = entry.savedAt ? formatRelative(entry.savedAt) : '';
     const dateStr = date ? ` _\\(${escapeMd(date)}\\)_` : '';
-    return `*${i + 1}\\.*${dateStr}\n   \`${escapeMd(entry.videoUrl)}\``;
+    return `*${i + 1}\\.*${dateStr}\n   \`${escapeMd(entry.sourceUrl)}\``;
   });
 
   await bot.sendMessage(
     msg.chat.id,
     [
-      `💾 *${list.length} video tersimpan:*`,
+      `💾 *${list.length} halaman tersimpan:*`,
       '',
       ...lines,
       '',
-      '_Kirim angka \\(misal `1`\\) untuk dapet tombol Watch/Download\\._',
+      '_Kirim angka \\(misal `1`\\) untuk extract ulang halaman tsb\\._',
     ].join('\n'),
     { parse_mode: 'MarkdownV2', disable_web_page_preview: true }
   );
@@ -207,9 +288,7 @@ bot.onText(/^\/clear$/, async (msg) => {
  * /clearchat — wipe recent chat history.
  *
  * Walks backward from the command message id, calling deleteMessage on each.
- * Telegram's 48-hour deletion window is the natural stopping point: once we
- * cross it, every call fails. We bail after a streak of failures rather than
- * iterating to message_id 0.
+ * Telegram's 48-hour deletion window is the natural stopping point.
  */
 bot.onText(/^\/clearchat$/, async (msg) => {
   if (!isAllowed(msg.chat.id)) return;
@@ -233,8 +312,6 @@ bot.onText(/^\/clearchat$/, async (msg) => {
       streak++;
       if (streak >= FAIL_STREAK_LIMIT) break;
     }
-    // Politeness: stay well under Telegram's per-chat rate limit (~1/s for
-    // bursts, but deleteMessage is more forgiving). 50ms gives ~20/s.
     await new Promise((r) => setTimeout(r, 50));
   }
 
@@ -248,7 +325,7 @@ bot.onText(/^\/clearchat$/, async (msg) => {
 });
 
 // ---------------------------------------------------------------------------
-// Free-form text: numeric → fetch saved entry, otherwise treat as URL.
+// Free-form text: numeric → re-extract saved page; otherwise treat as URL.
 // ---------------------------------------------------------------------------
 
 bot.on('message', async (msg) => {
@@ -256,7 +333,7 @@ bot.on('message', async (msg) => {
   const text = msg.text?.trim();
   if (!text || text.startsWith('/')) return;
 
-  // Numeric input → look up saved video by 1-based index.
+  // Numeric input → load saved entry and re-extract for fresh URLs.
   if (/^\d+$/.test(text)) {
     const num = Number(text);
     const entry = await getSavedAt(msg.chat.id, num - 1);
@@ -265,7 +342,7 @@ bot.on('message', async (msg) => {
       if (list.length === 0) {
         return bot.sendMessage(
           msg.chat.id,
-          'Belum ada video tersimpan\\. Pakai 💾 Save dulu\\.',
+          'Belum ada halaman tersimpan\\. Pakai 💾 Simpan dulu\\.',
           { parse_mode: 'MarkdownV2' }
         );
       }
@@ -275,21 +352,10 @@ bot.on('message', async (msg) => {
         { parse_mode: 'MarkdownV2' }
       );
     }
-    const keyboard = buildVideoKeyboard(entry.videoUrl, entry.sourceUrl, {
-      saved: true,
-    });
-    return bot.sendMessage(
-      msg.chat.id,
-      [
-        `*Saved \\#${num}*`,
-        `\`${escapeMd(entry.videoUrl)}\``,
-      ].join('\n'),
-      {
-        parse_mode: 'MarkdownV2',
-        disable_web_page_preview: true,
-        ...(keyboard ? { reply_markup: keyboard } : {}),
-      }
-    );
+
+    // Re-run the same pipeline as a fresh paste, but skip the Save button
+    // since it's already saved (typing the number means it came from /list).
+    return extractAndReply(msg.chat.id, entry.sourceUrl, { saveable: false });
   }
 
   // URL input → extract.
@@ -301,61 +367,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(msg.chat.id, '❌ Itu bukan URL yang valid.');
   }
 
-  const status = await bot.sendMessage(
-    msg.chat.id,
-    `🔍 Sedang ekstrak\\.\\.\\.\n\`${escapeMd(url.toString())}\``,
-    { parse_mode: 'MarkdownV2' }
-  );
-
-  try {
-    const videos = await extractVideos(url.toString());
-
-    if (videos.length === 0) {
-      return bot.editMessageText(
-        '❌ Tidak ditemukan video pada halaman ini\\.',
-        {
-          chat_id: msg.chat.id,
-          message_id: status.message_id,
-          parse_mode: 'MarkdownV2',
-        }
-      );
-    }
-
-    await bot.editMessageText(
-      `✅ Ditemukan *${videos.length}* video\\.`,
-      {
-        chat_id: msg.chat.id,
-        message_id: status.message_id,
-        parse_mode: 'MarkdownV2',
-        disable_web_page_preview: true,
-      }
-    );
-
-    for (let i = 0; i < videos.length; i++) {
-      const videoUrl = videos[i];
-      const keyboard = buildVideoKeyboard(videoUrl, url.toString());
-
-      const body = [
-        `*Video ${i + 1}*`,
-        `\`${escapeMd(videoUrl)}\``,
-      ].join('\n');
-
-      await bot.sendMessage(msg.chat.id, body, {
-        parse_mode: 'MarkdownV2',
-        disable_web_page_preview: true,
-        ...(keyboard ? { reply_markup: keyboard } : {}),
-      });
-    }
-  } catch (e) {
-    console.error('[bot] extract error:', e);
-    await bot
-      .editMessageText(`❌ Error: ${escapeMd(e.message || String(e))}`, {
-        chat_id: msg.chat.id,
-        message_id: status.message_id,
-        parse_mode: 'MarkdownV2',
-      })
-      .catch(() => {});
-  }
+  return extractAndReply(msg.chat.id, url.toString(), { saveable: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -379,32 +391,25 @@ bot.on('callback_query', async (cb) => {
       const pending = PENDING.get(token);
       if (!pending) {
         return bot.answerCallbackQuery(cb.id, {
-          text: 'Link sudah kedaluwarsa. Ekstrak ulang ya.',
+          text: 'Tombol sudah kedaluwarsa. Ekstrak ulang ya.',
           show_alert: true,
         });
       }
 
-      const { added, count } = await saveVideo(cb.message.chat.id, pending);
+      const { added, count } = await savePage(cb.message.chat.id, pending.sourceUrl);
       PENDING.delete(token);
 
-      // Replace the keyboard so the Save button becomes ✓ Saved (idempotent).
-      const newKeyboard = buildVideoKeyboard(
-        pending.videoUrl,
-        pending.sourceUrl,
-        { saved: true }
-      );
+      // Replace the keyboard so the Save button becomes ✓ Tersimpan.
       await bot
-        .editMessageReplyMarkup(newKeyboard || { inline_keyboard: [] }, {
+        .editMessageReplyMarkup(buildSavePageKeyboard(pending.sourceUrl, { saved: true }), {
           chat_id: cb.message.chat.id,
           message_id: cb.message.message_id,
         })
-        .catch(() => {
-          // Editing fails if the message is too old or already changed — fine.
-        });
+        .catch(() => {});
 
       return bot.answerCallbackQuery(cb.id, {
         text: added
-          ? `Disimpan. Total: ${count}. Pakai /list buat liat.`
+          ? `Disimpan. Total: ${count}. Kirim angka untuk akses /list.`
           : 'Sudah ada di list.',
       });
     }
