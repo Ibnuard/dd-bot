@@ -21,6 +21,9 @@ services:
     # We use a custom var name so only extractor.js opts in.
     environment:
       - EXTRACTOR_PROXY=socks5://host.docker.internal:40001
+      # Where the storage module persists saved.json. Path is inside the
+      # container; the named volume below maps it to the host.
+      - DATA_DIR=/app/data
     # Resolve `host.docker.internal` to the host's gateway IP so the bot can
     # reach Cloudflare WARP (or any other proxy) running on the VPS.
     extra_hosts:
@@ -36,3 +39,10 @@ services:
       resources:
         limits:
           memory: 512M
+    # Persist saved.json across rebuilds. The named volume lives on the host
+    # at /var/lib/docker/volumes/dd-bot_bot-data/_data/.
+    volumes:
+      - bot-data:/app/data
+
+volumes:
+  bot-data:

@@ -1,162 +1,106 @@
 # Doomsday Bot
 
-Self-contained Telegram bot that extracts video URLs from streaming pages and serves an iOS-friendly player. **One Node.js process. No web framework. No build step.**
+Self-contained Telegram bot that extracts video URLs from streaming pages and pairs with the [Doomsday Player](https://github.com/Ibnuard/doomsday) for in-browser playback of hotlink-protected content.
+
+## Quick deploy on a fresh VPS
+
+One command, idempotent. Tested on Ubuntu 22.04 / 24.04 / Debian 12.
+
+```bash
+git clone https://github.com/Ibnuard/dd-bot.git ~/dd-bot
+cd ~/dd-bot
+sudo bash scripts/deploy.sh
+```
+
+The script handles, in order:
+
+1. Install Docker + compose plugin (skipped if present).
+2. Install Cloudflare WARP, register, and put it in proxy mode on `127.0.0.1:40000`. This is what bypasses datacenter-IP fingerprinting on Cloudflare-protected sites.
+3. Install `socat` and a `warp-bridge.service` systemd unit that forwards `0.0.0.0:40001 → 127.0.0.1:40000`, so the docker container can reach WARP via `host.docker.internal:40001`.
+4. Prompt for env vars and write `.env` (with `chmod 600`).
+5. `docker compose up -d --build`.
+
+Re-run the script any time — every step checks current state before acting.
 
 ## Architecture
 
 ```
-[Telegram user]                 [iOS Safari user]
-       │                                │
-       ▼                                ▼
-  Telegram API                  https://your-vps/play
-       │                                │
-       └────────► doomsday-bot ◄────────┘
-                  (this process)
-                       │
-                       ▼
-            videccdn / vidvf / etc.
+[user paste URL]
+       │
+       ▼ Telegram polling
+[bot extracts video URL via WARP-routed fetch]
+       │
+       ├─► reply: 📺 Watch  ─► doomsday-player on Vercel ─► /play (HLS-aware)
+       └─► reply: 📥 Download ─► doomsday-player           ─► /api/stream?download=1
 ```
 
-Inside the process:
+Inside the bot process:
 
 | Module | Purpose |
 |--------|---------|
-| `index.js` | Entry point — boots HTTP server + Telegram poller |
-| `extractor.js` | Static HTML extraction with iframe-chain following |
-| `player.js` | `/play` page (HTML5 video) + `/stream` proxy (Range-aware) |
+| `index.js` | Entry — Telegram polling + reply formatter (inline keyboard with Watch/Download buttons) |
+| `extractor.js` | Static HTML extraction with iframe-chain following + SOCKS proxy support |
+| `sign.js` | HMAC signer that mints `/play` and `/api/stream?download=1` URLs paired with the player |
 
-## Quick start (local)
+## Manual setup (without the script)
 
-### Option A: Docker (simplest)
-
-```bash
-cd DOOMSDAY_BOT
-cp .env.example .env
-# fill in TELEGRAM_BOT_TOKEN at minimum
-docker compose up -d
-```
-
-### Option B: Plain Node
+If you'd rather do it by hand, the script is annotated step-by-step. Otherwise:
 
 ```bash
-cd DOOMSDAY_BOT
-npm install              # or pnpm install
-cp .env.example .env
-npm start
-```
-
-Either way:
-
-- `curl http://localhost:3000/health` → "Doomsday Bot is running."
-- DM your bot a video URL → get back direct + play links
-
-## Deploy to a VPS (recommended: Docker)
-
-```bash
-# On VPS — install Docker once
+# 1. Docker
 curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER  # log out/in after this
+sudo usermod -aG docker $USER  # log out/in
 
-# Clone, configure, run
-git clone <your-repo> /opt/doomsday
-cd /opt/doomsday/DOOMSDAY_BOT
+# 2. Clone & .env
+git clone https://github.com/Ibnuard/dd-bot.git ~/dd-bot
+cd ~/dd-bot
 cp .env.example .env
-nano .env   # fill TOKEN + PUBLIC_URL
+nano .env
+
+# 3. Run
 docker compose up -d
-docker compose logs -f       # check it boots cleanly
+docker compose logs -f
 ```
 
-Update flow:
-
-```bash
-cd /opt/doomsday
-git pull
-docker compose up -d --build  # rebuilds image, recreates container
-```
-
-### Alternative: native Node + PM2 (no Docker)
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-sudo apt install -y nodejs git
-sudo npm install -g pnpm pm2
-
-cd /opt
-git clone <your-repo> doomsday
-cd doomsday/DOOMSDAY_BOT
-pnpm install
-cp .env.example .env && nano .env
-pm2 start ecosystem.config.cjs
-pm2 save && pm2 startup
-```
-
-### Public HTTPS
-
-Pick one (run on the host, not inside the container):
-
-**Option 1: Caddy** (1-line auto-HTTPS, requires a domain pointed at the VPS)
-
-```bash
-sudo apt install -y caddy
-echo 'doomsday.example.com {
-  reverse_proxy localhost:3000
-}' | sudo tee /etc/caddy/Caddyfile
-sudo systemctl restart caddy
-```
-
-**Option 2: Cloudflare Tunnel** (no domain, no port-forward)
-
-```bash
-wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-sudo dpkg -i cloudflared-linux-amd64.deb
-cloudflared tunnel login
-cloudflared tunnel create doomsday
-cloudflared tunnel route dns doomsday doomsday.example.com
-sudo cloudflared service install <token-from-dashboard>
-```
-
-After HTTPS is live, set `PUBLIC_URL` in `.env` to the public URL and:
-
-```bash
-docker compose up -d   # picks up new env
-# OR for native install:
-pm2 reload doomsday-bot
-```
+WARP setup (only if your VPS gets blocked by Cloudflare on target sites) is documented inside `scripts/deploy.sh`.
 
 ## Environment variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | yes | From [@BotFather](https://t.me/BotFather) |
-| `PUBLIC_URL` | yes (for iOS links) | Public HTTPS URL of this server |
-| `PORT` | no | HTTP port, default `3000` |
 | `ALLOWED_CHAT_IDS` | no | Comma-separated Telegram chat IDs. Empty = open access. |
 | `SCRAPERAPI_KEY` | no | Cloudflare-bypass fallback (5k req/mo free at scraperapi.com) |
+| `PLAYER_BASE_URL` | recommended | Public URL of the deployed player, e.g. `https://doomsday-player.vercel.app`. Without this, the bot only replies with raw URLs (no Watch/Download buttons). |
+| `STREAM_SECRET` | with player | Shared HMAC secret. Must match the player's `STREAM_SECRET` env var on Vercel. Generate with `openssl rand -hex 32`. |
 
 Get your chat ID from [@userinfobot](https://t.me/userinfobot).
 
-## Updating
+## Day-to-day commands
 
 ```bash
-cd /opt/doomsday
+docker compose logs -f          # follow logs
+docker compose restart          # restart container
+docker compose down             # stop
+docker compose ps               # status
+
+# Update after a git pull
 git pull
-# Docker:
 docker compose up -d --build
-# Or native install:
-cd DOOMSDAY_BOT && pnpm install && pm2 reload doomsday-bot
 ```
 
 ## Troubleshooting
 
 | Symptom | Diagnosis |
 |---------|-----------|
-| Bot doesn't reply | `pm2 logs doomsday-bot` — check token + polling errors |
-| 403 from videccdn / "Just a moment..." | Cloudflare flagging your VPS IP. Set `SCRAPERAPI_KEY` for residential-proxy fallback |
-| `/play` link 404s on iOS | `PUBLIC_URL` mismatch. Must be reachable HTTPS from outside |
-| Video plays only partially | Some hosts use signed URLs that expire after N minutes — re-extract |
+| `[bot] TELEGRAM_BOT_TOKEN not set` | `.env` missing, has CRLF line endings, or token field empty. Run `dos2unix .env` if you uploaded from Windows. |
+| `[bot] polling error: ECONNREFUSED ...:40000` | `HTTPS_PROXY` / `HTTP_PROXY` is set in `.env` and Telegram polling is going through it. The bot uses `EXTRACTOR_PROXY` only for extractor traffic. Remove `HTTP(S)_PROXY` from `.env`. |
+| `[extractor] direct hit Cloudflare challenge` | Target site is Cloudflare-protected. Set `SCRAPERAPI_KEY`, or run the deploy script so WARP is active. |
+| Bot replies but Watch/Download buttons missing | `PLAYER_BASE_URL` or `STREAM_SECRET` not set. Check log for `[bot] player links: ENABLED`. |
+| `address already in use` on `docker compose up` | Some other service holds port 3000 on the host. The bot itself does not need a port; `docker-compose.yml` already removes the mapping. |
 
 ## Security notes
 
-- The `.env` file holds your bot token. Don't commit it (`.gitignore` already excludes it).
-- Set `ALLOWED_CHAT_IDS` if your bot is publicly findable — otherwise anyone can use it.
-- The `/stream` proxy passes through arbitrary URLs. If your VPS is small or bandwidth-limited, restrict who can use the bot.
+- `.env` holds the bot token and HMAC secret. `.gitignore` excludes it.
+- Set `ALLOWED_CHAT_IDS` if your bot is publicly findable.
+- Player links expire after 24h by default (tunable in `sign.js`).
