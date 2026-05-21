@@ -16,6 +16,7 @@ import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 
 import { extractVideos } from './extractor.js';
+import { buildPlayerUrl, isConfigured as isPlayerConfigured } from './sign.js';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALLOWED = (process.env.ALLOWED_CHAT_IDS || '')
@@ -35,6 +36,31 @@ const isAllowed = (chatId) =>
 
 const escapeMd = (s) =>
   String(s).replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '\\$&');
+
+/**
+ * Build a single video block in MarkdownV2.
+ *
+ * Layout:
+ *   *N.* 📺 [Tonton di browser](player_url)
+ *   `raw_cdn_url`
+ *
+ * If the player isn't configured (no PLAYER_BASE_URL/STREAM_SECRET), we drop
+ * the player line and just show the raw URL.
+ */
+function formatVideoBlock(number, videoUrl, sourceUrl) {
+  const lines = [`*${number}\\.* \`${escapeMd(videoUrl)}\``];
+  const playerUrl = buildPlayerUrl(videoUrl, sourceUrl);
+  if (playerUrl) {
+    // The (url) part of inline links must escape `)` and `\`; we keep our
+    // generated URLs simple enough that this isn't an issue, but escape just
+    // in case someone passes a weird upstream.
+    const safeUrl = playerUrl.replace(/\\/g, '\\\\').replace(/\)/g, '\\)');
+    lines.unshift(`*${number}\\.* 📺 [Tonton di browser](${safeUrl})`);
+    // Drop the duplicated number on the second line.
+    lines[1] = `   \`${escapeMd(videoUrl)}\``;
+  }
+  return lines.join('\n');
+}
 
 bot.onText(/^\/start$/, (msg) => {
   if (!isAllowed(msg.chat.id)) return;
@@ -111,11 +137,12 @@ bot.on('message', async (msg) => {
       );
     }
 
-    // Reply: a single message per video so users can long-press to copy/open.
-    // Note the escaped '.' after the number — MarkdownV2 requires it.
-    const header = `✅ Ditemukan *${videos.length}* video\n`;
+    // Reply: one block per video. When the player is configured, surface
+    // a 📺 link that goes through our proxy (handles Referer + HLS rewrite),
+    // and keep the raw CDN URL below for IDM/VLC users.
+    const header = `\u2705 Ditemukan *${videos.length}* video\n`;
     const blocks = videos
-      .map((videoUrl, i) => `*${i + 1}\\.* \`${escapeMd(videoUrl)}\``)
+      .map((videoUrl, i) => formatVideoBlock(i + 1, videoUrl, url.toString()))
       .join('\n\n');
 
     await bot.editMessageText([header, blocks].join('\n'), {
@@ -141,6 +168,9 @@ bot.on('polling_error', (e) => console.error('[bot] polling error:', e.message))
 console.log(`[bot] running.`);
 console.log(
   `[bot] allowlist: ${ALLOWED.length === 0 ? 'OPEN (anyone can use)' : ALLOWED.join(', ')}`
+);
+console.log(
+  `[bot] player links: ${isPlayerConfigured() ? 'ENABLED' : 'disabled (set PLAYER_BASE_URL + STREAM_SECRET)'}`
 );
 
 // Graceful shutdown
