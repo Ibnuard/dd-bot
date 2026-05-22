@@ -15,4 +15,3 @@ ecosystem.config.cjs
 .vscode
 .idea
 data
-scripts

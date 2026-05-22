@@ -17,6 +17,19 @@
 import nodeFetch from 'node-fetch';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 
+import { matchesAlpha, extractAlpha } from './extractors/alpha.js';
+
+// Site-specific handlers. Each entry: { match, extract }.
+// `match(url)` returns true if this handler can process the URL;
+// `extract(url, fetchImpl)` returns array of video URLs (or [] when nothing).
+//
+// Site handlers run BEFORE the generic recursive extractor. They exist for
+// pages that use JS-side hashing/auth and never expose a real video URL in
+// raw HTML.
+const SITE_HANDLERS = [
+  { name: 'alpha', match: matchesAlpha, extract: extractAlpha },
+];
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -162,8 +175,28 @@ async function fetchHtml(pageUrl, depth, referer) {
 /**
  * Recursively extract video URLs from a page.
  * Returns deduplicated array of absolute URLs.
+ *
+ * Strategy:
+ *   1. Try a site-specific handler if one matches the URL host. These return
+ *      results from JS-driven APIs that the generic crawler can't reach.
+ *   2. Otherwise (or if the handler returned nothing) fall back to the generic
+ *      iframe-chain + regex extractor.
  */
 export async function extractVideos(pageUrl) {
+  for (const handler of SITE_HANDLERS) {
+    if (!handler.match(pageUrl)) continue;
+    try {
+      const results = await handler.extract(pageUrl, httpFetch);
+      if (results && results.length > 0) {
+        console.log(`[extractor] handler '${handler.name}' returned ${results.length} URL(s)`);
+        return Array.from(new Set(results));
+      }
+      console.log(`[extractor] handler '${handler.name}' returned nothing, falling back`);
+    } catch (e) {
+      console.log(`[extractor] handler '${handler.name}' threw:`, e.message);
+    }
+  }
+
   const videos = new Set();
   await extractRecursive(pageUrl, 0, undefined, videos);
   return Array.from(videos);

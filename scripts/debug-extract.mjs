@@ -16,6 +16,8 @@
  */
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import nodeFetch from 'node-fetch';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 
@@ -60,7 +62,7 @@ console.log(`length: ${res.headers.get('content-length') || '(stream)'}`);
 const html = await res.text();
 console.log(`html length: ${html.length}\n`);
 
-const dump = `/tmp/dd-debug-${Date.now()}.html`;
+const dump = path.join(os.tmpdir(), `dd-debug-${Date.now()}.html`);
 await fs.writeFile(dump, html, 'utf8');
 console.log(`saved full html to: ${dump}\n`);
 
